@@ -1,16 +1,14 @@
 import os
 import signal
-from ping3 import ping
-import tqdm 
-import concurrent.futures
+import tqdm
 from netaddr import iter_iprange, IPAddress
-import itertools
 import argparse
-from threading import Event
 from pymongo import MongoClient
+import asyncio
+import aioping
 
+FIELDS_NAMES = ["ip", "error", "timeout", "unknown_host", "response_time"]
 
-FIELDS_NAMES =  ["ip", "error", "timeout", "unknown_host", "response_time"]
 
 def ip_range_generator(config):
     gen = iter_iprange(config.start_ip, config.end_ip, step=config.BATCH_SIZE)
@@ -20,86 +18,113 @@ def ip_range_generator(config):
         yield ip, end_ip_capped
 
 
-def run_one_batch(pbar, config, stop, start, end):
-    rows = []
-    for ip in iter_iprange(start, end):
-        if stop.is_set():
-            return
-        ip_str = str(ip)
-        result = {
-            "ip": ip.value,
-            "error": None,
-            "timeout": False,
-            "unknown_host": False,
-            "response_time": None
-        }
-        try:
-            resp = ping(ip_str, unit="ms", timeout=1)
-            if resp is None:
-                result["timeout"] = True
-            elif not resp:
-                result["unknown_host"] = True
-            else:
-                result["response_time"] = resp
-        except OSError as err:
-            result["error"] = str(err)
-        finally:
-            rows.append(result)
-            pbar.update()
+class WorkItem:
+    def __init__(self, config, start, end) -> None:
+        self.config = config
+        self.start = start
+        self.end = end
+        self.result = []
 
-    config.collection.insert_many(rows)
+    def add_result(self, result):
+        self.result.append(result)
 
+    def get_range(self):
+        return iter_iprange(self.start, self.end)
+
+    def finish(self):
+        self.config.collection.insert_many(self.result)
+
+
+async def worker(name, queue: asyncio.Queue, pbar, stop):
+    pbar.write(f"{name} stared")
+    while True:
+        # Get a ip range out of the queue.
+        work_item: WorkItem = await queue.get()
+        for ip in work_item.get_range():
+            if stop.is_set():
+                return
+            ip_str = str(ip)
+            result = {
+                "ip": ip.value,
+                "error": None,
+                "timeout": False,
+                "unknown_host": False,
+                "response_time": None,
+            }
+            try:
+                resp = await aioping.ping(ip_str, timeout=1)
+                if resp is None:
+                    result["timeout"] = True
+                elif not resp:
+                    result["unknown_host"] = True
+                else:
+                    result["response_time"] = resp * 1000
+            except OSError as err:
+                result["error"] = str(err)
+            finally:
+                work_item.add_result(result)
+                pbar.update()
+
+        work_item.finish()
+        queue.task_done()
 
 
 class GracefulKiller:
     kill_now = False
+
     def __init__(self, event):
         signal.signal(signal.SIGINT, self.exit_gracefully)
         signal.signal(signal.SIGTERM, self.exit_gracefully)
-        self.event = event 
+        self.event = event
+
     def exit_gracefully(self, *args):
         self.kill_now = True
         self.event.set()
 
-def run(config):
+
+async def run(config):
     ips = ip_range_generator(config)
-    stop = Event()
+    stop = asyncio.Event()
     pbar = tqdm.tqdm(total=config.end_ip.value - config.start_ip.value, smoothing=0)
     killer = GracefulKiller(stop)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=config.POOL_SIZE) as executor:
-        # Start the load operations and mark each future with its ip range
-        # over feeding to reduce downtime
-        future_to_index = {executor.submit(run_one_batch, pbar, config, stop, *ip): ip for ip in itertools.islice(ips, config.POOL_SIZE + config.OVER_FEEDING)}
-        while future_to_index:
-            done, _ = concurrent.futures.wait(
-                future_to_index, timeout=0.25,
-                return_when=concurrent.futures.FIRST_COMPLETED)
-            
-            for future in done:
-                # for debug
-                future.result()
-                next_range = next(ips, None)
-                if next_range:
-                    future_to_index[executor.submit(run_one_batch, pbar, config, stop, *next_range)] = next_range
-                del future_to_index[future]
-            
-            if killer.kill_now:
-                pbar.write("Stopping; Waiting for completion")
-                break
+
+    queue = asyncio.Queue(maxsize=config.POOL_SIZE + config.OVER_FEEDING)
+
+    workers = [
+        asyncio.create_task(worker(f"worker {i}", queue, pbar, stop))
+        for i in range(config.POOL_SIZE)
+    ]
+
+    for ip in ips:
+        if killer.kill_now:
+            pbar.write("Stopping; Waiting for completion")
+            break
+        try:
+            queue.put_nowait(WorkItem(config, *ip))
+        except asyncio.QueueFull:
+            await asyncio.sleep(0.1)
+
+    # Cancel our worker tasks.
+    for w in workers:
+        w.cancel()
+    # Wait until all worker tasks are cancelled.
+    await asyncio.gather(*workers)
+
 
 def get_start_ip(collection):
     value = collection.find_one({}, sort=[("ip", -1)])
     if value:
-        return IPAddress(value["ip"]+1)
+        return IPAddress(value["ip"] + 1)
     return IPAddress(0)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ping the web")
     parser.add_argument("collection_name", type=str, default="ip")
     parser.add_argument("--mongo_host", type=str, default="localhost")
     parser.add_argument("--mongo_port", type=str, default="27017")
-    parser.add_argument("--POOL_SIZE", "-ps", type=int, default=200)
-    parser.add_argument("--BATCH_SIZE", "-bs", type=int, default=100)
+    parser.add_argument("--POOL_SIZE", "-ps", type=int, default=5)
+    parser.add_argument("--BATCH_SIZE", "-bs", type=int, default=2000)
     parser.add_argument("--OVER_FEEDING", "-of", type=int, default=5)
     parser.add_argument("--DATA_FOLDER", "-f", type=str, default="data")
     args = parser.parse_args()
@@ -108,4 +133,4 @@ if __name__ == "__main__":
     args.start_ip = get_start_ip(args.collection)
     args.end_ip = IPAddress("255.255.255.255")
     os.makedirs(args.DATA_FOLDER, exist_ok=True)
-    run(args)
+    asyncio.run(run(args))

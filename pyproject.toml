@@ -10,6 +10,7 @@ ping3 = "^4.0.3"
 tqdm = "^4.64.0"
 netaddr = "^0.8.0"
 pymongo = "^4.1.1"
+aioping = "^0.3.1"
 
 [tool.poetry.dev-dependencies]
 black = {version = "^22.3.0", allow-prereleases = true}
