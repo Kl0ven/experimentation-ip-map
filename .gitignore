@@ -2,3 +2,7 @@
 /.vscode
 /.wakatime-project
 /__pycache__
+
+data/*
+!data/ignores.txt
+out/
