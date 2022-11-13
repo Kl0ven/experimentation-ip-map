@@ -18,7 +18,7 @@ Here is the result:
 
 [Map of the ignored ips](https://www.easyzoom.com/imageaccess/bea51f2c2b41441783275bcbbd3284dc)
 
-[Full map 2022 and ignored ip in orange](https://www.easyzoom.com/imageaccess/d03407a6e4c54829ba3f67cddd2291a5)
+[Full map 2022 and ignored ip in orange](https://www.easyzoom.com/imageaccess/0e2da761880c4d89b8d0e7e65445c928)
 
 ## usage
 

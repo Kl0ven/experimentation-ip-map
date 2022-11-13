@@ -36,12 +36,24 @@ class IgnoreStore:
 
         draw = ImageDraw.Draw(img)
         for network in self.ignored_networks:
-            size = int(network.num_addresses**0.5 / 2)
-            ip_mid = network[int(network.num_addresses / 2)]
-            x_mid, y_mid = hilbert.point_from_distance(ip_mid._ip)
-            draw.rectangle(
-                [x_mid - size, y_mid - size, x_mid + size, y_mid + size], fill=color
+            is_squared = (
+                int(network.num_addresses**0.5) == network.num_addresses**0.5
             )
+            if not is_squared:
+                for ip in network:
+                    point = hilbert.point_from_distance(ip._ip)
+                    img.putpixel(point, color)
+            else:
+                half_size = int(network.num_addresses**0.5 / 2)
+                ip_mid = network[int(network.num_addresses / 2)]
+                x_mid, y_mid = hilbert.point_from_distance(ip_mid._ip)
+
+                x_min = x_mid - half_size
+                y_min = y_mid - half_size
+                x_max = x_mid + half_size
+                y_max = y_mid + half_size
+
+                draw.rectangle([x_min, y_min, x_max, y_max], fill=color)
 
     def __contains__(self, ip: IPv4Address):
         for network in self.ignored_networks:
@@ -62,6 +74,9 @@ class IgnoreStore:
 if __name__ == "__main__":
     ignore = IgnoreStore("data/ignores.txt")
     hc = HilbertCurve(16, 2)
+    # Image.MAX_IMAGE_PIXELS = 41073741824
     img = Image.new("1", (2**16, 2**16))
     ignore.annotate_image(img, hc, color=1)
-    img.save("out/fast_ignore.png")
+    # img = img.crop([2**15 + 28700, 2**14 + 12600, 2**16 - 2000, 2**15 - 2000])
+
+    img.save("out/ignore.png")
